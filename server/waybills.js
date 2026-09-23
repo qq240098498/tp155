@@ -2,6 +2,8 @@ const { badRequest, notFound } = require('./errors');
 const { load, save, nextId } = require('./store');
 const pricing = require('./pricing');
 const zones = require('./zones');
+const trials = require('./trials');
+const ruleVersions = require('./ruleVersions');
 const { findCustomer } = require('./customers');
 
 const SERVICES = ['保价', '签收', '上门'];
@@ -129,20 +131,28 @@ function removeWaybill(id) {
   return { removed: id };
 }
 
-// 单条计费：算完之后把结果记在运单上，页面上再次打开可以直接看到上次算出来的数
+// 单条计费：按运单所属时刻（创建时刻）生效的规则版本试算，算完之后把结果记在运单上
 function quote(id) {
   const data = load();
   const waybill = findWaybill(data, id);
   if (!waybill) throw notFound('WAYBILL_NOT_FOUND', '运单不存在');
-  const settings = pricing.settingsOf(data);
-  const zone = zones.zoneOfCity(data, waybill.toCity);
+  const version = ruleVersions.effectiveVersionAt(data, waybill.createdAt);
+  if (!version) throw badRequest('VERSION_EFFECTIVE_NONE', '运单创建时刻 ' + waybill.createdAt + ' 还没有任何生效的规则版本');
+  const ctx = trials.contextOfVersion(data, version);
+  const zone = zones.zoneOfCity({ zones: ctx.zones }, waybill.toCity);
   if (!zone) throw badRequest('WAYBILL_ZONE_UNKNOWN', '收件城市 ' + waybill.toCity + ' 还没有归属到任何分区');
   const customer = findCustomer(data, waybill.customerId);
-  const result = pricing.quoteWaybill(waybill, zone, customer, settings);
+  const result = pricing.quoteWaybill(waybill, zone, customer, ctx.settings);
   waybill.quoteCacheYuan = result.totalYuan;
   waybill.quoteCachedAt = new Date().toISOString();
+  waybill.quoteVersion = version.version;
   save(data);
-  return Object.assign({ waybill: decorate(waybill, load()) }, result);
+  const response = Object.assign({ waybill: decorate(waybill, load()) }, result, {
+    pricingVersion: version.version,
+    pricingVersionNote: version.note,
+    pricingVersionCreatedAt: version.createdAt,
+  });
+  return response;
 }
 
 module.exports = {

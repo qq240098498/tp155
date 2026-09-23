@@ -26,6 +26,7 @@ function emptyData() {
     customers: [],
     waybills: [],
     bills: [],
+    pricingVersions: [],
   };
 }
 
@@ -39,6 +40,7 @@ function normalize(raw) {
     customers: Array.isArray(data.customers) ? data.customers.filter((item) => item && item.id) : [],
     waybills: Array.isArray(data.waybills) ? data.waybills.filter((item) => item && item.id) : [],
     bills: Array.isArray(data.bills) ? data.bills.filter((item) => item && item.id) : [],
+    pricingVersions: Array.isArray(data.pricingVersions) ? data.pricingVersions.filter((item) => item && item.version) : [],
   };
   out.zones.forEach((zone) => {
     if (!Array.isArray(zone.cities)) zone.cities = [];
@@ -49,7 +51,38 @@ function normalize(raw) {
   });
   out.bills.forEach((bill) => {
     if (!Array.isArray(bill.waybillIds)) bill.waybillIds = [];
+    if (!Array.isArray(bill.lines)) bill.lines = [];
   });
+  out.pricingVersions.forEach((version) => {
+    if (!version.snapshot || typeof version.snapshot !== 'object') version.snapshot = {};
+    if (!Array.isArray(version.snapshot.zones)) version.snapshot.zones = [];
+    if (!version.snapshot.settings || typeof version.snapshot.settings !== 'object') version.snapshot.settings = {};
+    if (!Array.isArray(version.changes)) version.changes = [];
+  });
+  // 旧数据没有版本历史：把现有的全局参数与分区价格固化成 V1 基线，
+  // 这样升级前产生的运单与账单都能追溯到“当时那一版”。
+  if (out.pricingVersions.length === 0) {
+    out.pricingVersions.push({
+      version: 1,
+      note: '系统初始化基线（升级前的全局价格）',
+      source: '系统',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      changes: [],
+      snapshot: {
+        settings: clone(out.settings),
+        zones: out.zones.map((zone) => ({
+          id: zone.id,
+          code: zone.code,
+          name: zone.name,
+          firstWeightKg: Number(zone.firstWeightKg) || 0,
+          firstPriceYuan: Number(zone.firstPriceYuan) || 0,
+          addUnitKg: Number(zone.addUnitKg) || 0,
+          addPriceYuan: Number(zone.addPriceYuan) || 0,
+          remoteFeeYuan: Number(zone.remoteFeeYuan) || 0,
+        })),
+      },
+    });
+  }
   return out;
 }
 

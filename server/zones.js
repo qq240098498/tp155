@@ -1,5 +1,6 @@
 const { badRequest, notFound } = require('./errors');
 const { load, save, nextId } = require('./store');
+const ruleVersions = require('./ruleVersions');
 
 function cleanCity(value) {
   return String(value == null ? '' : value).trim();
@@ -91,6 +92,8 @@ function createZone(payload) {
   }
   const zone = Object.assign({ id: nextId('zone', data.zones) }, clean);
   data.zones.push(zone);
+  // 新分区带来了新的价格项，固化一版规则
+  ruleVersions.createVersion(data, { note: '新增分区 ' + clean.code + ' ' + clean.name, source: '分区维护' });
   save(data);
   return zone;
 }
@@ -103,7 +106,14 @@ function updateZone(id, payload) {
   if (data.zones.some((zone) => zone.id !== id && zone.code === clean.code)) {
     throw badRequest('ZONE_CODE_DUPLICATE', '分区编码 ' + clean.code + ' 已经存在', { field: 'code' });
   }
+  const before = ruleVersions.zonePriceOf(current);
   Object.assign(current, clean);
+  const after = ruleVersions.zonePriceOf(current);
+  const priceChanged = ruleVersions.ZONE_PRICE_FIELDS.some((field) => Number(before[field]) !== Number(after[field]));
+  // 只改城市、别名或名称不影响计价口径；只有价格（首重/续重/偏远附加）变了才出新版
+  if (priceChanged) {
+    ruleVersions.createVersion(data, { note: '调整分区 ' + clean.code + ' ' + clean.name + ' 价格', source: '分区维护' });
+  }
   save(data);
   return current;
 }
@@ -120,7 +130,9 @@ function removeZone(id) {
   if (used.length > 0) {
     throw badRequest('ZONE_IN_USE', '这个分区下的城市还有 ' + used.length + ' 条运单在用，先处理完再删', { count: used.length });
   }
+  const removed = { code: current.code, name: current.name };
   data.zones = data.zones.filter((zone) => zone.id !== id);
+  ruleVersions.createVersion(data, { note: '删除分区 ' + removed.code + ' ' + removed.name, source: '分区维护' });
   save(data);
   return { removed: id };
 }

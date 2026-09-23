@@ -2,11 +2,11 @@
   "meta": {
     "name": "运单计费与账单核对台",
     "currency": "CNY",
-    "updatedAt": "2026-09-22T12:48:30.802Z"
+    "updatedAt": "2026-09-23T08:32:54.994Z"
   },
   "settings": {
     "volumetricDivisor": 6000,
-    "minChargeYuan": 8,
+    "minChargeYuan": 81,
     "oversizeWeightKg": 30,
     "oversizePieces": 3,
     "oversizeFeeYuan": 20,
@@ -768,6 +768,137 @@
       ],
       "amountYuan": 269.3915,
       "discountPermille": 950
+    }
+  ],
+  "pricingVersions": [
+    {
+      "version": 1,
+      "note": "系统初始化基线（升级前的全局价格）",
+      "source": "系统",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "changes": [],
+      "snapshot": {
+        "settings": {
+          "volumetricDivisor": 6000,
+          "minChargeYuan": 8,
+          "oversizeWeightKg": 30,
+          "oversizePieces": 3,
+          "oversizeFeeYuan": 20,
+          "insurancePermille": 20
+        },
+        "zones": [
+          {
+            "id": "zone-0001",
+            "code": "Z1",
+            "name": "同城",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 8,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 1.5,
+            "remoteFeeYuan": 0
+          },
+          {
+            "id": "zone-0002",
+            "code": "Z2",
+            "name": "省内",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 10,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 2,
+            "remoteFeeYuan": 0
+          },
+          {
+            "id": "zone-0003",
+            "code": "Z3",
+            "name": "跨省",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 12,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 3,
+            "remoteFeeYuan": 2
+          },
+          {
+            "id": "zone-0004",
+            "code": "Z4",
+            "name": "偏远",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 15,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 4,
+            "remoteFeeYuan": 5
+          }
+        ]
+      }
+    },
+    {
+      "version": 2,
+      "note": "调整全局计费参数：最低收费（元）",
+      "source": "全局参数",
+      "createdAt": "2026-09-23T08:32:54.994Z",
+      "changes": [
+        {
+          "scope": "全局参数",
+          "path": "settings.minChargeYuan",
+          "field": "minChargeYuan",
+          "fieldLabel": "最低收费（元）",
+          "refId": "",
+          "refName": "全局参数",
+          "before": 8,
+          "after": 81
+        }
+      ],
+      "snapshot": {
+        "settings": {
+          "volumetricDivisor": 6000,
+          "minChargeYuan": 81,
+          "oversizeWeightKg": 30,
+          "oversizePieces": 3,
+          "oversizeFeeYuan": 20,
+          "insurancePermille": 20
+        },
+        "zones": [
+          {
+            "id": "zone-0001",
+            "code": "Z1",
+            "name": "同城",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 8,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 1.5,
+            "remoteFeeYuan": 0
+          },
+          {
+            "id": "zone-0002",
+            "code": "Z2",
+            "name": "省内",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 10,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 2,
+            "remoteFeeYuan": 0
+          },
+          {
+            "id": "zone-0003",
+            "code": "Z3",
+            "name": "跨省",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 12,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 3,
+            "remoteFeeYuan": 2
+          },
+          {
+            "id": "zone-0004",
+            "code": "Z4",
+            "name": "偏远",
+            "firstWeightKg": 1,
+            "firstPriceYuan": 15,
+            "addUnitKg": 0.5,
+            "addPriceYuan": 4,
+            "remoteFeeYuan": 5
+          }
+        ]
+      }
     }
   ]
 }
