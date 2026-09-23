@@ -25,7 +25,44 @@ function decorate(waybill, data) {
     weightText: Number(waybill.weightKg).toFixed(2) + ' kg',
     volumeText: Number(waybill.volumeM3).toFixed(3) + ' m³',
     createdAtText: String(waybill.createdAt || '').replace('T', ' ').slice(0, 16),
+    pricingView: pricingViewOf(data, waybill, zone, customer),
   });
+}
+
+// 运单维度的版本对比：按创建时刻生效版本（应收）与当前最新版本（现在重算）并排
+function pricingViewOf(data, waybill, zoneArg, customerArg) {
+  const zone = zoneArg || zones.zoneOfCity(data, waybill.toCity);
+  const customer = customerArg || findCustomer(data, waybill.customerId);
+  const thenVersion = pricing.effectiveVersionAt(data, waybill.createdAt);
+  const latest = pricing.latestVersion(data);
+  if (!thenVersion || !latest) {
+    return { available: false, zoneKnown: Boolean(zone) };
+  }
+  const thenSnap = { settings: thenVersion.snapshot.settings, zones: thenVersion.snapshot.zones || [] };
+  const nowSnap = { settings: latest.snapshot.settings, zones: latest.snapshot.zones || [] };
+  const thenQuote = pricing.quoteWithSnapshot(waybill, zone, customer, thenSnap);
+  const nowQuote = pricing.quoteWithSnapshot(waybill, zone, customer, nowSnap);
+  const missing = thenQuote.priceMissing || nowQuote.priceMissing;
+  return {
+    available: true,
+    zoneKnown: Boolean(zone),
+    priceMissing: missing,
+    thenVersionNo: thenVersion.versionNo,
+    thenEffectiveAt: thenVersion.effectiveAt,
+    thenBillableKg: thenQuote.billableKg,
+    thenFreightYuan: thenQuote.priceMissing ? null : thenQuote.freightYuan,
+    thenSurchargeYuan: thenQuote.priceMissing ? null : thenQuote.surchargeYuan,
+    thenTotalYuan: thenQuote.priceMissing ? null : thenQuote.totalYuan,
+    currentVersionNo: latest.versionNo,
+    currentEffectiveAt: latest.effectiveAt,
+    currentBillableKg: nowQuote.billableKg,
+    currentFreightYuan: nowQuote.priceMissing ? null : nowQuote.freightYuan,
+    currentSurchargeYuan: nowQuote.priceMissing ? null : nowQuote.surchargeYuan,
+    currentTotalYuan: nowQuote.priceMissing ? null : nowQuote.totalYuan,
+    diffYuan: missing ? null : pricing.roundFen(nowQuote.totalYuan - thenQuote.totalYuan),
+    reasons: missing ? [] : pricing.diffReasons(thenQuote, nowQuote, thenSnap, nowSnap),
+    quoteVersionNo: waybill.quoteVersionNo || null,
+  };
 }
 
 function listWaybills(query) {
@@ -129,20 +166,26 @@ function removeWaybill(id) {
   return { removed: id };
 }
 
-// 单条计费：算完之后把结果记在运单上，页面上再次打开可以直接看到上次算出来的数
+// 单条计费：按运单创建时刻生效的规则版本试算；算完把结果与所用版本记在运单上
 function quote(id) {
   const data = load();
   const waybill = findWaybill(data, id);
   if (!waybill) throw notFound('WAYBILL_NOT_FOUND', '运单不存在');
-  const settings = pricing.settingsOf(data);
   const zone = zones.zoneOfCity(data, waybill.toCity);
   if (!zone) throw badRequest('WAYBILL_ZONE_UNKNOWN', '收件城市 ' + waybill.toCity + ' 还没有归属到任何分区');
   const customer = findCustomer(data, waybill.customerId);
-  const result = pricing.quoteWaybill(waybill, zone, customer, settings);
+  const version = pricing.effectiveVersionAt(data, waybill.createdAt);
+  if (!version) throw badRequest('PRICING_NO_VERSION', '运单创建时刻没有可用的计费规则版本');
+  const snapshot = { settings: version.snapshot.settings, zones: version.snapshot.zones || [] };
+  const result = pricing.quoteWithSnapshot(waybill, zone, customer, snapshot);
+  if (result.priceMissing) {
+    throw badRequest('PRICING_ZONE_PRICE_MISSING', '运单创建时刻生效的 v' + version.versionNo + ' 里没有分区「' + zone.name + '」的价目，无法按当时版本计费');
+  }
   waybill.quoteCacheYuan = result.totalYuan;
   waybill.quoteCachedAt = new Date().toISOString();
+  waybill.quoteVersionNo = version.versionNo;
   save(data);
-  return Object.assign({ waybill: decorate(waybill, load()) }, result);
+  return Object.assign({ waybill: decorate(waybill, load()), pricingVersionNo: version.versionNo, pricingVersionEffectiveAt: version.effectiveAt }, result);
 }
 
 module.exports = {
@@ -153,5 +196,6 @@ module.exports = {
   removeWaybill,
   quote,
   decorate,
+  pricingViewOf,
   SERVICES,
 };

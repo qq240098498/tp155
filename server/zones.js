@@ -1,5 +1,7 @@
 const { badRequest, notFound } = require('./errors');
 const { load, save, nextId } = require('./store');
+const pricing = require('./pricing');
+const versions = require('./versions');
 
 function cleanCity(value) {
   return String(value == null ? '' : value).trim();
@@ -83,6 +85,14 @@ function validateZonePayload(payload, current) {
   return { code, name, status, firstWeightKg, firstPriceYuan, addUnitKg, addPriceYuan, remoteFeeYuan, cities, aliases };
 }
 
+const ZONE_PRICE_FIELDS = ['firstWeightKg', 'firstPriceYuan', 'addUnitKg', 'addPriceYuan', 'remoteFeeYuan'];
+
+// 只有首重/续重/偏远这些影响金额的字段变化才出版本；城市、别名、名称、状态变化不出版本
+function priceChanged(before, after) {
+  if (!before) return true;
+  return ZONE_PRICE_FIELDS.some((key) => Number(before[key] || 0) !== Number(after[key] || 0));
+}
+
 function createZone(payload) {
   const data = load();
   const clean = validateZonePayload(payload, null);
@@ -91,6 +101,8 @@ function createZone(payload) {
   }
   const zone = Object.assign({ id: nextId('zone', data.zones) }, clean);
   data.zones.push(zone);
+  // 新分区带来了一套新价目，记一个版本
+  versions.publishVersion(data, { source: 'zone', reason: '新增分区「' + clean.name + '」并登记价目' });
   save(data);
   return zone;
 }
@@ -103,7 +115,11 @@ function updateZone(id, payload) {
   if (data.zones.some((zone) => zone.id !== id && zone.code === clean.code)) {
     throw badRequest('ZONE_CODE_DUPLICATE', '分区编码 ' + clean.code + ' 已经存在', { field: 'code' });
   }
+  const before = Object.assign({}, current);
   Object.assign(current, clean);
+  if (priceChanged(before, clean)) {
+    versions.publishVersion(data, { source: 'zone', reason: '调整分区「' + clean.name + '」价格' });
+  }
   save(data);
   return current;
 }
@@ -120,7 +136,10 @@ function removeZone(id) {
   if (used.length > 0) {
     throw badRequest('ZONE_IN_USE', '这个分区下的城市还有 ' + used.length + ' 条运单在用，先处理完再删', { count: used.length });
   }
+  const removedName = current.name;
   data.zones = data.zones.filter((zone) => zone.id !== id);
+  // 删掉一套价目会影响以后的试算（城市归属可能落到别的分区），同样记版本
+  versions.publishVersion(data, { source: 'zone', reason: '删除分区「' + removedName + '」及其价目' });
   save(data);
   return { removed: id };
 }

@@ -5,15 +5,24 @@
   /* ================= 常量 ================= */
   var STATUSES = ['待发', '在途', '已签收', '退回'];
   var SERVICE_OPTIONS = ['保价', '签收', '上门'];
-  var TAB_LABELS = { overview: '概览', waybills: '运单', zones: '分区', customers: '客户', bills: '账单' };
+  var TAB_LABELS = { overview: '概览', waybills: '运单', zones: '分区', customers: '客户', rules: '规则', bills: '账单' };
   var FIELD_LABELS = {
     code: '编码/运单号', name: '名称', status: '状态', customerId: '客户',
     fromCity: '寄件城市', toCity: '收件城市', weightKg: '实际重量', volumeM3: '体积',
     pieces: '件数', insuredAmountYuan: '保价金额', services: '附加服务', createdAt: '创建时刻',
     cities: '覆盖城市', aliases: '城市别名', settle: '结算方式', discountPermille: '折扣',
     periodDay: '账期日', period: '账期', firstWeightKg: '首重公斤', firstPriceYuan: '首重价',
-    addUnitKg: '续重单位', addPriceYuan: '续重价', remoteFeeYuan: '偏远附加', billId: '账单'
+    addUnitKg: '续重单位', addPriceYuan: '续重价', remoteFeeYuan: '偏远附加', billId: '账单',
+    effectiveAt: '生效时刻', reason: '改动说明'
   };
+  var SETTING_DEFS = [
+    { key: 'volumetricDivisor', label: '体积系数', step: '1' },
+    { key: 'minChargeYuan', label: '最低收费（元）', step: '0.01' },
+    { key: 'oversizeWeightKg', label: '超规重量线（kg）', step: '0.5' },
+    { key: 'oversizePieces', label: '超规件数线（件）', step: '1' },
+    { key: 'oversizeFeeYuan', label: '超规附加（元）', step: '0.01' },
+    { key: 'insurancePermille', label: '保价费率（千分比）', step: '1' }
+  ];
 
   /* ================= 状态 ================= */
   var state = {
@@ -37,6 +46,25 @@
     billDetail: null,
     billLoading: false,
     quote: null,              // 最近一次单条计费结果
+    rules: {
+      list: [],
+      total: 0,
+      latestVersionNo: null,
+      selectedVersionNo: null,
+      versionDetail: null,
+      mode: 'detail',         // detail | publish
+      effectiveInput: '',
+      effective: null,
+      compareA: '',
+      compareB: '',
+      versionDiff: null,
+      trialScope: 'unbilled', // all | unbilled | customer | period
+      trialCustomerId: '',
+      trialPeriod: '',
+      trial: null,
+      trialLoading: false,
+      publishEffectiveNow: true
+    },
     confirm: null             // { kind, id } 二次确认删除
   };
 
@@ -127,6 +155,16 @@
   function loadCustomers() { return api('GET', '/api/customers').then(function (r) { state.customers = (r && r.customers) || []; }); }
   function loadPeriods() { return api('GET', '/api/periods').then(function (r) { state.periods = (r && r.periods) || []; }); }
   function loadBills() { return api('GET', '/api/bills').then(function (r) { state.bills = r || { bills: [], total: 0, issued: 0, voided: 0 }; }); }
+  function loadRules() {
+    return api('GET', '/api/pricing-versions').then(function (r) {
+      state.rules.list = (r && r.versions) || [];
+      state.rules.total = (r && r.total) || 0;
+      state.rules.latestVersionNo = r ? r.latestVersionNo : null;
+      if (!state.rules.selectedVersionNo && state.rules.list.length) {
+        state.rules.selectedVersionNo = state.rules.list[0].versionNo;
+      }
+    });
+  }
 
   function waybillQuery() {
     var qs = [];
@@ -147,7 +185,7 @@
     function keep(promise) { return promise.catch(function (err) { errors.push(err); }); }
     return Promise.all([
       keep(loadSummary()), keep(loadZones()), keep(loadCustomers()),
-      keep(loadWaybills()), keep(loadBills()), keep(loadPeriods())
+      keep(loadWaybills()), keep(loadBills()), keep(loadPeriods()), keep(loadRules())
     ]).then(function () {
       if (errors.length) throw errors[0];
     });
@@ -238,6 +276,9 @@
         break;
       case 'customers':
         text = '客户清单 ' + num(state.customers.length) + ' 个';
+        break;
+      case 'rules':
+        text = '计费规则版本 ' + num(state.rules.total) + ' 个，当前 v' + num(state.rules.latestVersionNo);
         break;
       case 'bills':
         text = '账单清单 ' + num(state.bills.total) + ' 张';
@@ -336,18 +377,20 @@
     var st = s.settings || {};
     var settingsHtml =
       '<dl class="kv-list">' +
+      '<dt>当前版本</dt><dd class="is-amber">v' + esc(num(s.currentVersionNo)) + '（' + esc(stampText(s.currentVersionEffectiveAt)) + ' 生效，共 ' + esc(num(s.pricingVersionCount)) + ' 版）</dd>' +
       '<dt>体积系数</dt><dd>' + esc(num(st.volumetricDivisor)) + '</dd>' +
       '<dt>最低收费</dt><dd>' + esc(money(st.minChargeYuan)) + ' 元</dd>' +
       '<dt>超规线</dt><dd>' + esc(num(st.oversizeWeightKg)) + ' kg 或 ' + esc(num(st.oversizePieces)) + ' 件</dd>' +
       '<dt>超规附加</dt><dd>' + esc(money(st.oversizeFeeYuan)) + ' 元</dd>' +
       '<dt>保价费率</dt><dd>' + esc((Number(st.insurancePermille) || 0) / 10) + ' %（千分比 ' + esc(num(st.insurancePermille)) + '）</dd>' +
-      '</dl>';
+      '</dl>' +
+      '<button type="button" class="btn btn-ghost btn-block" data-action="tab" data-tab="rules" style="margin-top:8px;">查看版本链与时刻查询</button>';
 
     var body =
       '<div class="block"><h3 class="block-title">未归属城市（' + num(cities.length) + ' 个）</h3>' +
       '<p class="block-hint">这些收件城市没有登记到任何分区，对应的运单算不出运费、也进不了账单。</p>' + cityHtml + '</div>' +
       '<div class="block"><h3 class="block-title">已有账期（' + num(periods.length) + ' 个）</h3>' + periodHtml + '</div>' +
-      '<div class="block"><h3 class="block-title">计费参数</h3>' + settingsHtml + '</div>';
+      '<div class="block"><h3 class="block-title">计费参数与版本</h3>' + settingsHtml + '</div>';
 
     return paneBlock('关注项与参数', '', body);
   }
@@ -482,6 +525,44 @@
       '</form>';
   }
 
+  // 运单详情里的版本并排对比：按创建时刻生效版本（应收）vs 当前最新版本（现在重算）
+  function renderWaybillVersionPanel(item) {
+    var pv = item.pricingView;
+    if (!pv || !pv.available) return '';
+    if (!pv.zoneKnown) {
+      return '<div class="block"><h3 class="block-title">按版本试算对比</h3><p class="block-hint">收件城市还没有归属分区，任何版本都算不出金额。</p></div>';
+    }
+    if (pv.priceMissing) {
+      return '<div class="block"><h3 class="block-title">按版本试算对比</h3><p class="block-hint warn-text">该运单涉及的某个版本里缺少对应分区价目，无法并排试算。</p></div>';
+    }
+    var sameVersion = Number(pv.thenVersionNo) === Number(pv.currentVersionNo);
+    var head =
+      '<div class="compare-grid">' +
+      '<div class="compare-cell"><span>创建时刻版本 v' + esc(num(pv.thenVersionNo)) + '<br><small>' + esc(stampText(pv.thenEffectiveAt)) + ' 生效</small></span><b>' + money(pv.thenTotalYuan) + ' 元</b></div>' +
+      '<div class="compare-cell"><span>当前版本 v' + esc(num(pv.currentVersionNo)) + '<br><small>' + esc(stampText(pv.currentEffectiveAt)) + ' 生效</small></span><b>' + money(pv.currentTotalYuan) + ' 元</b></div>' +
+      '<div class="compare-cell is-diff"><span>当前 − 当时 差额</span><b class="' + diffClass(pv.diffYuan) + '">' + signedMoney(pv.diffYuan) + ' 元</b></div>' +
+      '</div>';
+    var rows =
+      '<div class="amount-row"><span>计费重量</span><b>' + esc(kg(pv.thenBillableKg)) + ' → ' + esc(kg(pv.currentBillableKg)) + '</b></div>' +
+      '<div class="amount-row"><span>运费</span><b>' + money(pv.thenFreightYuan) + ' → ' + money(pv.currentFreightYuan) + ' 元</b></div>' +
+      '<div class="amount-row"><span>附加费</span><b>' + money(pv.thenSurchargeYuan) + ' → ' + money(pv.currentSurchargeYuan) + ' 元</b></div>';
+    var note;
+    if (item.locked) {
+      note = '这条运单已进账单，应收以出账时锁定的金额为准，这里的差额仅供说明规则变化；未出账运单则按创建时刻版本试算收费。';
+    } else {
+      note = sameVersion
+        ? '创建时刻与当前是同一版本，金额没有因规则变化而不同。'
+        : '未出账运单按创建时刻生效的 v' + pv.thenVersionNo + ' 试算收费；若现在才出账，与当前 v' + pv.currentVersionNo + ' 的差额如上。';
+    }
+    var reasons = (pv.reasons || []).length
+      ? '<ul class="change-list">' + pv.reasons.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>'
+      : '<p class="block-hint">两版算出的分量完全相同。</p>';
+    return '<div class="block"><h3 class="block-title">按当时版本 vs 按当前版本</h3>' + head +
+      '<div class="panel" style="margin-top:8px;">' + rows + '</div>' +
+      '<div class="block-title" style="margin:8px 0 4px;font-size:12px;">差额原因</div>' + reasons +
+      '<p class="foot-note">' + esc(note) + '</p></div>';
+  }
+
   function renderWaybillsRight() {
     if (state.waybillMode === 'create' || state.waybillMode === 'edit') {
       var editing = null;
@@ -505,7 +586,7 @@
     var quoteHtml = '';
     if (quote) {
       quoteHtml = '<div class="panel is-amber">' +
-        '<h4 class="panel-title">本次计费结果（' + esc(quote.zoneName || '—') + '）</h4>' +
+        '<h4 class="panel-title">本次计费结果（' + esc(quote.zoneName || '—') + '，按创建时刻生效 v' + esc(num(quote.pricingVersionNo)) + '）</h4>' +
         '<div class="amount-row"><span>计费重量</span><b>' + esc(kg(quote.billableKg)) + '</b></div>' +
         '<div class="amount-row"><span>运费</span><b>' + esc(money(quote.freightYuan)) + ' 元</b></div>' +
         '<div class="amount-row"><span>附加费</span><b>' + esc(money(quote.surchargeYuan)) + ' 元</b></div>' +
@@ -513,6 +594,8 @@
         '<div class="amount-row is-total"><span>合计</span><b>' + esc(money(quote.totalYuan)) + ' 元</b></div>' +
         '</div>';
     }
+
+    var versionHtml = renderWaybillVersionPanel(item);
 
     var detail =
       '<div class="detail-head">' +
@@ -532,9 +615,10 @@
       '<dt>创建时刻</dt><dd>' + esc(timeTextOf(item.createdAt)) + '</dd>' +
       '<dt>分区</dt><dd class="' + (item.zoneKnown ? '' : 'is-warn') + '">' + esc(item.zoneName) + (item.zoneKnown ? '' : '（该城市未登记分区，不能计费）') + '</dd>' +
       '<dt>入账情况</dt><dd class="' + (item.locked ? 'is-amber' : '') + '">' + (item.locked ? ('已入账：' + esc(item.billCode) + '（' + esc(item.billStatus) + '）') : '未入账') + '</dd>' +
-      '<dt>上次计费</dt><dd class="' + (cached > 0 ? 'is-amber' : '') + '">' + (cached > 0 ? (esc(money(cached)) + ' 元（' + esc(timeTextOf(item.quoteCachedAt)) + '）') : '未计费') + '</dd>' +
+      '<dt>上次计费</dt><dd class="' + (cached > 0 ? 'is-amber' : '') + '">' + (cached > 0 ? (esc(money(cached)) + ' 元（' + esc(timeTextOf(item.quoteCachedAt)) + (item.quoteVersionNo ? '，按 v' + esc(num(item.quoteVersionNo)) : '') + '）') : '未计费') + '</dd>' +
       '</dl>' +
       quoteHtml +
+      versionHtml +
       '<div class="btn-stack">' +
       '<button type="button" class="btn btn-primary" data-action="quote-waybill" data-id="' + attr(item.id) + '">单条计费</button>' +
       '<button type="button" class="btn" data-action="edit-waybill" data-id="' + attr(item.id) + '">编辑这条运单</button>' +
@@ -1111,6 +1195,44 @@
     return paneBlock('账单清单', meta, html);
   }
 
+  // 账单详情：已锁定金额 / 按当时版本重算 / 按当前版本重算，逐单写清差额与原因
+  function renderBillRepricingPanel(bill) {
+    var r = bill.repricing;
+    if (!r) return '';
+    var head =
+      '<div class="compare-grid three">' +
+      '<div class="compare-cell"><span>出账锁定金额' + (bill.status === '已出账' ? '' : '（账单已作废）') + '</span><b>' + money(r.billedTotal) + ' 元</b></div>' +
+      '<div class="compare-cell"><span>按当时版本重算<br><small>各运单创建时刻生效版</small></span><b>' + money(r.thenTotal) + ' 元</b>' +
+        '<em class="' + diffClass(r.thenVsBilledDiffYuan) + '">较锁定 ' + signedMoney(r.thenVsBilledDiffYuan) + '</em></div>' +
+      '<div class="compare-cell is-diff"><span>按当前版本重算</span><b>' + money(r.currentTotal) + ' 元</b>' +
+        '<em class="' + diffClass(r.currentVsBilledDiffYuan) + '">较锁定 ' + signedMoney(r.currentVsBilledDiffYuan) + '</em></div>' +
+      '</div>';
+    var note;
+    if (bill.status !== '已出账') {
+      note = '这张账单已作废，金额仅作留档。';
+    } else if (Number(r.currentVsBilledDiffYuan) === 0 && Number(r.thenVsBilledDiffYuan) === 0) {
+      note = '账单金额在出账时已锁定；用当时版本与当前版本重算都与锁定金额一致，规则变化没有影响这张账单。';
+    } else {
+      note = '账单金额在出账时已锁定，不会因之后改价而变动；下表把锁定金额与两种重算结果并排列出并写清差额原因。';
+    }
+    var rows = (r.rows || []).map(function (row) {
+      return '<tr>' +
+        '<td>' + esc(row.code) + '</td>' +
+        '<td>' + esc(row.billedZoneName || '-') + (row.zoneChanged ? ' → <span class="diff-down">' + esc(row.thenZoneName) + '</span>' : '') + '</td>' +
+        '<td class="num">' + money(row.billedYuan) + '</td>' +
+        '<td class="num">' + (row.thenYuan === null ? '—' : money(row.thenYuan)) + '</td>' +
+        '<td class="num">' + (row.currentYuan === null ? '—' : money(row.currentYuan)) + '</td>' +
+        '<td class="num ' + diffClass(row.diffYuan) + '">' + (row.diffYuan === null ? '—' : signedMoney(row.diffYuan)) + '</td>' +
+        '<td class="reason-cell">' + esc((row.reasons || []).join('；') || '一致') + '</td>' +
+        '</tr>';
+    }).join('');
+    var table = '<div class="table-wrap is-wide"><table><thead><tr>' +
+      '<th>运单号</th><th>出账/当前分区</th><th class="num">锁定(元)</th><th class="num">当时版(元)</th><th class="num">当前版(元)</th><th class="num">当前−锁定</th><th>差额原因</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+    return '<div class="block"><h3 class="block-title">锁定金额与版本重算对比</h3>' + head +
+      '<p class="foot-note">' + esc(note) + '</p>' + table + '</div>';
+  }
+
   function renderBillsRight() {
     var bill = state.billDetail;
     if (!bill || bill.id !== state.selectedBillId) {
@@ -1127,17 +1249,19 @@
         '<td>' + esc(line.zoneName || '-') + '</td>' +
         '<td class="num">' + esc(line.billableText || kg(line.billableKg)) + '</td>' +
         '<td class="num">' + esc(line.amountText || money(line.amountYuan)) + '</td>' +
-        '<td>' + (line.fromCache ? '取自上次计费' : '本次计算') + '</td>' +
+        '<td>' + (line.versionNo ? ('v' + esc(num(line.versionNo))) : (line.fromCache ? '缓存' : '旧口径')) + '</td>' +
         '</tr>';
     }).join('');
 
     var table = lines.length
       ? '<div class="table-wrap"><table><thead><tr>' +
-      '<th>运单号</th><th>收件城市</th><th>分区</th><th class="num">计费重量</th><th class="num">金额(元)</th><th>计费来源</th>' +
+      '<th>运单号</th><th>收件城市</th><th>分区</th><th class="num">计费重量</th><th class="num">锁定金额(元)</th><th>出账版本</th>' +
       '</tr></thead><tbody>' + rows + '</tbody>' +
-      '<tfoot><tr class="tfoot-row"><td colspan="4">明细合计</td><td class="num">' + esc(bill.lineSumText || money(bill.lineSumYuan)) + '</td><td>' + esc(num(bill.waybillCount)) + ' 条</td></tr></tfoot>' +
+      '<tfoot><tr class="tfoot-row"><td colspan="4">锁定金额合计</td><td class="num">' + esc(bill.lineSumText || money(bill.lineSumYuan)) + '</td><td>' + esc(num(bill.waybillCount)) + ' 条</td></tr></tfoot>' +
       '</table></div>'
       : emptyBlock('这张账单没有明细行', '可以作废后重新出账。');
+
+    var repricingHtml = renderBillRepricingPanel(bill);
 
     var head =
       '<div class="detail-head">' +
@@ -1156,6 +1280,7 @@
       '<div class="amount-row"><span>账单金额</span><b>' + esc(bill.amountText || money(bill.amountYuan)) + ' 元</b></div>' +
       '<div class="amount-row is-total"><span>明细合计</span><b>' + esc(bill.lineSumText || money(bill.lineSumYuan)) + ' 元</b></div>' +
       '</div>' +
+      repricingHtml +
       '<div class="block"><h3 class="block-title">逐条明细</h3>' + table + '</div>' +
       '<div class="btn-stack">' +
       (bill.status === '已出账'
@@ -1230,12 +1355,349 @@
     }
   }
 
+  /* ================= 规则版本 ================= */
+  function signedMoney(value) {
+    var n = Number(value);
+    if (!isFinite(n) || n === 0) return '±0.00';
+    return (n > 0 ? '+' : '') + money(n);
+  }
+  function diffClass(value) {
+    var n = Number(value);
+    if (!isFinite(n) || n === 0) return 'diff-flat';
+    return n > 0 ? 'diff-up' : 'diff-down';
+  }
+  function versionOptionsHtml(selectedNo, allowLatest) {
+    var head = allowLatest ? '<option value="latest">最新版本</option>' : '';
+    return head + state.rules.list.slice().sort(function (a, b) { return a.versionNo - b.versionNo; }).map(function (v) {
+      var selected = String(selectedNo) === 'latest' ? false : Number(v.versionNo) === Number(selectedNo);
+      return '<option value="' + attr(v.versionNo) + '"' + (selected ? ' selected' : '') + '>v' + v.versionNo + '（' + esc(stampText(v.effectiveAt)) + '）</option>';
+    }).join('') + (String(selectedNo) === 'latest' && allowLatest ? '' : '');
+  }
+  function settingValueOf(version, key) {
+    var st = (version && version.snapshot && version.snapshot.settings) || {};
+    return st[key];
+  }
+  function changeText(change) {
+    if (change.kind === 'setting') {
+      return esc(change.label) + '：<b class="diff-down">' + esc(num(change.before)) + '</b> → <b class="diff-up">' + esc(num(change.after)) + '</b>';
+    }
+    if (change.kind === 'zone') {
+      return esc(change.zoneCode + ' ' + change.zoneName + ' · ' + change.label) + '：<b class="diff-down">' + esc(num(change.before)) + '</b> → <b class="diff-up">' + esc(num(change.after)) + '</b>';
+    }
+    if (change.kind === 'zone-added') return '新增分区价目：<b class="diff-up">' + esc(change.zoneCode + ' ' + change.zoneName) + '</b>';
+    if (change.kind === 'zone-removed') return '删除分区价目：<b class="diff-down">' + esc(change.zoneCode + ' ' + change.zoneName) + '</b>';
+    return esc(change.kind);
+  }
+
+  function renderRulesLeft() {
+    var r = state.rules;
+    var eff = r.effective;
+    var effHtml = eff
+      ? '<div class="panel is-amber"><div class="amount-row"><span>' + esc(stampText(eff.at)) + ' 在用版本</span><b>v' + esc(num(eff.versionNo)) + '</b></div>' +
+        '<div class="amount-row"><span>生效时刻</span><b>' + esc(stampText(eff.effectiveAt)) + '</b></div>' +
+        '<div class="amount-row"><span>版本说明</span><b style="font-weight:400;text-align:right;">' + esc(eff.reason || '—') + '</b></div>' +
+        (eff.isLatest ? '<p class="foot-note">这就是当前最新版本。</p>' : '<p class="foot-note warn-text">该时刻用的是历史版本，之后已有新版本生效。</p>') +
+        '</div>'
+      : '<p class="block-hint">输入任意时刻查询当时在用的规则版本，例如 2026-08-03 10:20。</p>';
+    var body =
+      '<div class="block"><h3 class="block-title">任意时刻在用版本</h3>' +
+      '<label class="field" data-field-wrap="effectiveAt"><span class="field-label">时刻</span>' +
+      '<input type="text" id="ruleEffectiveAt" placeholder="2026-08-03 10:20" value="' + attr(r.effectiveInput || '') + '"><span class="field-msg"></span></label>' +
+      '<button type="button" class="btn btn-primary btn-block" data-action="query-effective">查询这个时刻在用哪一版</button>' +
+      '<div style="margin-top:10px;">' + effHtml + '</div></div>' +
+      '<div class="block"><h3 class="block-title">版本统计</h3><div class="stat-list">' +
+      '<div class="stat-row"><span class="stat-name">版本总数</span><span class="stat-val">' + num(r.total) + ' 个</span></div>' +
+      '<div class="stat-row"><span class="stat-name">当前最新版本</span><span class="stat-val">v' + num(r.latestVersionNo) + '</span></div>' +
+      '</div></div>' +
+      '<button type="button" class="btn btn-amber btn-block" data-action="new-rule-version">发布新版本</button>' +
+      '<button type="button" class="btn btn-ghost btn-block" data-action="refresh-rules">刷新版本清单</button>' +
+      '<p class="foot-note">在「分区」标签调整首重/续重/偏远价，保存时也会自动生成新版本；只改覆盖城市或别名不会发版。</p>';
+    return paneBlock('规则版本', 'GET /api/pricing-versions', body);
+  }
+
+  function renderRulesMid() {
+    var list = state.rules.list || [];
+    if (!list.length) return paneBlock('版本清单', '', emptyBlock('还没有任何版本', '点左侧「发布新版本」开始。'));
+    var html = list.map(function (v) {
+      var selected = Number(v.versionNo) === Number(state.rules.selectedVersionNo);
+      var isLatest = Number(v.versionNo) === Number(state.rules.latestVersionNo);
+      var tags = '';
+      if (isLatest) tags += '<span class="tag tag-amber">当前版本</span>';
+      if (v.isBaseline) tags += '<span class="tag">基线</span>';
+      if (v.changeCount) tags += '<span class="tag tag-warn">' + num(v.changeCount) + ' 项改动</span>';
+      return '<article class="card' + (selected ? ' is-selected' : '') + '" data-action="select-rule-version" data-id="' + attr(v.versionNo) + '">' +
+        '<div class="card-top"><span class="card-code">v' + esc(num(v.versionNo)) + '</span>' +
+        '<span class="badge ' + (isLatest ? 'st-transit' : 'badge-plain') + '">' + (isLatest ? '最新' : '历史') + '</span></div>' +
+        '<div class="card-sub">生效：' + esc(stampText(v.effectiveAt)) + '</div>' +
+        '<div class="card-sub">' + esc(v.reason || '（无说明）') + '</div>' +
+        '<div class="card-tags">' + tags + '</div>' +
+        '</article>';
+    }).join('');
+    return paneBlock('版本清单', '共 ' + num(list.length) + ' 版（新→旧）', '<div class="card-grid">' + html + '</div>');
+  }
+
+  function rulePublishFormHtml() {
+    var s = (state.summary && state.summary.settings) || {};
+    var rows = SETTING_DEFS.map(function (def) {
+      return '<label class="field"><span class="field-label">' + esc(def.label) + '</span>' +
+        '<input type="number" step="' + attr(def.step) + '" min="0" data-field="' + attr(def.key) + '" value="' + attr(s[def.key] === undefined ? '' : s[def.key]) + '"></label>';
+    }).join('');
+    return '<form id="rulePublishForm" autocomplete="off" onsubmit="return false;">' +
+      '<div class="block"><h3 class="block-title">新版本内容</h3>' +
+      '<label class="check"><input type="checkbox" id="rulePublishNow"' + (state.rules.publishEffectiveNow ? ' checked' : '') + '>立即生效（不勾则在下面指定生效时刻）</label>' +
+      '<label class="field" data-field-wrap="effectiveAt"><span class="field-label">生效时刻（不立即生效时填写）</span>' +
+      '<input type="text" data-field="effectiveAt" placeholder="2026-10-01 00:00" value=""' + (state.rules.publishEffectiveNow ? ' disabled' : '') + '><span class="field-msg"></span></label>' +
+      '<label class="field" data-field-wrap="reason"><span class="field-label">改动说明</span>' +
+      '<input type="text" data-field="reason" placeholder="例如：旺季最低收费上调"><span class="field-msg"></span></label>' +
+      '<div class="field-grid">' + rows + '</div>' +
+      '<p class="foot-note">所有参数按当前值预填，只改你要调的项；与上一版完全相同会被拒绝。分区价格请在「分区」标签调整，保存即自动发版。</p>' +
+      '</div>' +
+      '<div class="btn-row"><button type="button" class="btn btn-primary" data-action="publish-rule-version">发布新版本</button>' +
+      '<button type="button" class="btn btn-ghost" data-action="cancel-rule-form">取消</button></div></form>';
+  }
+
+  function renderVersionDiffBlock() {
+    var r = state.rules;
+    var diff = r.versionDiff;
+    var diffHtml = '';
+    if (diff) {
+      if (diff.identical) {
+        diffHtml = '<p class="block-hint">这两版完全相同，没有差异项。</p>';
+      } else {
+        diffHtml = '<div class="table-wrap"><table><thead><tr><th>版本 ' + esc(num(diff.versionA.versionNo)) + ' → ' + esc(num(diff.versionB.versionNo)) + ' 的差异项（' + num(diff.total) + '）</th></tr></thead><tbody>' +
+          diff.diffs.map(function (d) { return '<tr><td>' + changeText(d) + '</td></tr>'; }).join('') +
+          '</tbody></table></div>';
+      }
+    }
+    return '<div class="block"><h3 class="block-title">两版对比</h3>' +
+      '<div class="field-grid">' +
+      '<label class="field"><span class="field-label">版本 A</span><select id="ruleCompareA">' + versionOptionsHtml(r.compareA) + '</select></label>' +
+      '<label class="field"><span class="field-label">版本 B</span><select id="ruleCompareB">' + versionOptionsHtml(r.compareB) + '</select></label>' +
+      '</div>' +
+      '<button type="button" class="btn btn-primary btn-block" data-action="apply-version-diff">列出两版差异项</button>' +
+      '<div style="margin-top:10px;">' + diffHtml + '</div></div>';
+  }
+
+  function renderTrialBlock() {
+    var r = state.rules;
+    var scopes = [
+      { key: 'unbilled', label: '全部未出账运单' },
+      { key: 'all', label: '全部运单（含已出账，仅试算不改账）' },
+      { key: 'customer', label: '按客户' },
+      { key: 'period', label: '按账期' }
+    ];
+    var scopeHtml = scopes.map(function (sc) {
+      return '<label class="check-inline"><input type="radio" name="trialScope" value="' + attr(sc.key) + '"' + (r.trialScope === sc.key ? ' checked' : '') + '>' + esc(sc.label) + '</label>';
+    }).join('');
+    var periodOptions = (state.periods || []).map(function (p) {
+      return '<option value="' + attr(p) + '"' + (r.trialPeriod === p ? ' selected' : '') + '>' + esc(p) + '</option>';
+    }).join('');
+    var trialHtml = '';
+    if (r.trialLoading) {
+      trialHtml = '<p class="block-hint">正在用两版规则试算…</p>';
+    } else if (r.trial) {
+      var t = r.trial;
+      var rows = t.lines.map(function (l) {
+        if (l.priceMissing) {
+          return '<tr><td>' + esc(l.code) + '</td><td>' + esc(l.toCity) + '</td><td>' + esc(l.zoneName) + '</td>' +
+            '<td class="num" colspan="4">该版本里没有这个分区的价目，无法试算</td></tr>';
+        }
+        return '<tr><td>' + esc(l.code) + '</td><td>' + esc(l.toCity) + '</td><td>' + esc(l.zoneName) + '</td>' +
+          '<td class="num">' + money(l.totalA) + '</td><td class="num">' + money(l.totalB) + '</td>' +
+          '<td class="num ' + diffClass(l.diffYuan) + '"><b>' + signedMoney(l.diffYuan) + '</b></td>' +
+          '<td class="reason-cell">' + esc((l.reasons || []).join('；') || '金额相同') + '</td></tr>';
+      }).join('');
+      trialHtml =
+        '<div class="compare-grid">' +
+        '<div class="compare-cell"><span>A v' + esc(num(t.versionA.versionNo)) + ' 合计</span><b>' + money(t.totalA) + ' 元</b></div>' +
+        '<div class="compare-cell"><span>B v' + esc(num(t.versionB.versionNo)) + ' 合计</span><b>' + money(t.totalB) + ' 元</b></div>' +
+        '<div class="compare-cell is-diff"><span>B − A 差额合计</span><b class="' + diffClass(t.diffYuan) + '">' + signedMoney(t.diffYuan) + ' 元</b></div>' +
+        '</div>' +
+        '<p class="foot-note">共 ' + num(t.lines.length) + ' 条运单，' + num(t.affectedCount) + ' 条金额有变化' + (t.missingCount ? '，' + num(t.missingCount) + ' 条缺价目已跳过' : '') + '。试算只用于对比，不会改变已出账账单金额。</p>' +
+        '<div class="table-wrap is-wide"><table><thead><tr><th>运单号</th><th>收件城市</th><th>分区</th>' +
+        '<th class="num">A 金额(元)</th><th class="num">B 金额(元)</th><th class="num">差额</th><th>差额原因</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+    }
+    return '<div class="block"><h3 class="block-title">用这两版试算同一批运单</h3>' +
+      '<div class="check-inline-row">' + scopeHtml + '</div>' +
+      '<div class="field-grid" id="trialScopeBox">' +
+      '<label class="field" id="trialCustomerBox" ' + (r.trialScope === 'customer' ? '' : 'hidden') + '><span class="field-label">客户</span><select id="trialCustomerId">' + customerOptionsHtml(r.trialCustomerId, '全部客户') + '</select></label>' +
+      '<label class="field" id="trialPeriodBox" ' + (r.trialScope === 'period' ? '' : 'hidden') + '><span class="field-label">账期</span><select id="trialPeriod"><option value="">全部账期</option>' + periodOptions + '</select></label>' +
+      '</div>' +
+      '<button type="button" class="btn btn-amber btn-block" data-action="run-version-trial">用 A、B 两版分别试算并对比</button>' +
+      '<div style="margin-top:10px;">' + trialHtml + '</div></div>';
+  }
+
+  function renderRulesRight() {
+    var r = state.rules;
+    if (r.mode === 'publish') {
+      return paneBlock('发布新版本', 'POST /api/pricing-versions/publish', rulePublishFormHtml());
+    }
+    var version = r.versionDetail;
+    if (!version || Number(version.versionNo) !== Number(r.selectedVersionNo)) {
+      return paneBlock('版本详情', '', r.versionDetail === null && r.selectedVersionNo ? loadingBlock('正在读取版本详情…') : emptyBlock('还没有选中版本', '在中间清单里点一个版本查看。'));
+    }
+    var st = version.snapshot.settings || {};
+    var settingsHtml = SETTING_DEFS.map(function (def) {
+      return '<div class="amount-row"><span>' + esc(def.label) + '</span><b>' + esc(num(st[def.key])) + '</b></div>';
+    }).join('');
+    var zoneRows = (version.snapshot.zones || []).map(function (z) {
+      return '<tr><td>' + esc(z.code + ' ' + z.name) + '</td>' +
+        '<td class="num">' + esc(num(z.firstWeightKg)) + 'kg / ' + money(z.firstPriceYuan) + '</td>' +
+        '<td class="num">' + esc(num(z.addUnitKg)) + 'kg / ' + money(z.addPriceYuan) + '</td>' +
+        '<td class="num">' + money(z.remoteFeeYuan) + '</td></tr>';
+    }).join('');
+    var zoneTable = '<div class="table-wrap"><table><thead><tr><th>分区</th><th class="num">首重</th><th class="num">续重</th><th class="num">偏远附加</th></tr></thead><tbody>' + zoneRows + '</tbody></table></div>';
+    var changeHtml = (version.changes || []).length
+      ? '<div class="block"><h3 class="block-title">本版改了哪些项（' + num(version.changes.length) + '）</h3>' +
+        '<ul class="change-list">' + version.changes.map(function (c) { return '<li>' + changeText(c) + '</li>'; }).join('') + '</ul></div>'
+      : '<div class="block"><h3 class="block-title">本版改动</h3><p class="block-hint">基线版本，无改动记录。</p></div>';
+
+    var detail =
+      '<div class="detail-head"><span class="detail-title">版本 v' + esc(num(version.versionNo)) + '</span>' +
+      (version.isLatest ? '<span class="badge st-transit">当前生效</span>' : '<span class="badge badge-plain">历史版本</span>') + '</div>' +
+      '<dl class="kv-list">' +
+      '<dt>版本号</dt><dd>v' + esc(num(version.versionNo)) + '</dd>' +
+      '<dt>生效时刻</dt><dd>' + esc(stampText(version.effectiveAt)) + '</dd>' +
+      '<dt>登记时刻</dt><dd>' + esc(stampText(version.createdAt)) + '</dd>' +
+      '<dt>版本说明</dt><dd>' + esc(version.reason || '—') + '</dd>' +
+      '<dt>上一版 / 下一版</dt><dd>' + (version.previousVersionNo ? 'v' + esc(num(version.previousVersionNo)) : '—') + ' / ' + (version.nextVersionNo ? 'v' + esc(num(version.nextVersionNo)) : '—') + '</dd>' +
+      '</dl>' +
+      '<div class="panel"><h4 class="panel-title">本版全局参数快照</h4>' + settingsHtml + '</div>' +
+      '<div class="block" style="margin-top:10px;"><h3 class="block-title">本版分区价目快照</h3>' + zoneTable + '</div>' +
+      changeHtml +
+      renderVersionDiffBlock() +
+      renderTrialBlock() +
+      '<div class="btn-stack"><button type="button" class="btn btn-amber" data-action="new-rule-version">以当前参数为基础发布新版本</button></div>' +
+      '<p class="foot-note">未出账运单按其创建时刻生效的版本试算；已出账账单金额在出账时锁定，之后改规则不会变动账单，只在账单页展示重算差额。</p>';
+    return paneBlock('版本详情', 'v' + version.versionNo, detail);
+  }
+
+  async function loadRuleVersionDetail(versionNo) {
+    var r = state.rules;
+    r.versionDetail = null;
+    renderRight();
+    try {
+      var res = await api('GET', '/api/pricing-versions/' + encodeURIComponent(versionNo));
+      if (Number(r.selectedVersionNo) === Number(versionNo)) r.versionDetail = res.version;
+      renderRight();
+    } catch (err) { fail(err); }
+  }
+
+  async function selectRuleVersion(versionNo) {
+    state.rules.selectedVersionNo = Number(versionNo);
+    state.rules.versionDiff = null;
+    state.rules.trial = null;
+    renderMid();
+    await loadRuleVersionDetail(versionNo);
+    // 默认拿「上一版 → 当前最新版」做对比
+    var detail = state.rules.versionDetail;
+    if (detail) {
+      if (!state.rules.compareA) state.rules.compareA = String(detail.previousVersionNo || detail.versionNo);
+      if (!state.rules.compareB || Number(state.rules.compareB) === Number(detail.versionNo)) {
+        state.rules.compareB = String(state.rules.latestVersionNo || detail.versionNo);
+      }
+      renderRight();
+    }
+    setStatus('已选中版本 v' + versionNo);
+  }
+
+  async function queryEffectiveVersion() {
+    var el = document.getElementById('ruleEffectiveAt');
+    var at = el ? el.value.trim() : '';
+    state.rules.effectiveInput = at;
+    if (!at) { markFieldError('effectiveAt'); return; }
+    try {
+      state.rules.effective = await api('GET', '/api/pricing-versions/effective?at=' + encodeURIComponent(at));
+      renderLeft();
+      var e = state.rules.effective;
+      ok('时刻 ' + at + ' 在用的是 v' + e.versionNo + '（' + (e.isLatest ? '当前最新版本' : '历史版本') + '）');
+    } catch (err) { fail(err); }
+  }
+
+  function readCompareSelects() {
+    var a = document.getElementById('ruleCompareA');
+    var b = document.getElementById('ruleCompareB');
+    state.rules.compareA = a ? a.value : state.rules.compareA;
+    state.rules.compareB = b ? b.value : state.rules.compareB;
+  }
+
+  async function applyVersionDiff() {
+    readCompareSelects();
+    try {
+      state.rules.versionDiff = await api('GET', '/api/pricing-versions/diff?a=' + encodeURIComponent(state.rules.compareA) + '&b=' + encodeURIComponent(state.rules.compareB));
+      renderRight();
+      var d = state.rules.versionDiff;
+      ok('v' + d.versionA.versionNo + ' 与 v' + d.versionB.versionNo + ' 共有 ' + d.total + ' 项差异');
+    } catch (err) { fail(err); }
+  }
+
+  async function runVersionTrial() {
+    readCompareSelects();
+    var scopeEl = document.querySelector('input[name="trialScope"]:checked');
+    state.rules.trialScope = scopeEl ? scopeEl.value : 'unbilled';
+    var customerEl = document.getElementById('trialCustomerId');
+    var periodEl = document.getElementById('trialPeriod');
+    state.rules.trialCustomerId = customerEl ? customerEl.value : '';
+    state.rules.trialPeriod = periodEl ? periodEl.value : '';
+    var payload = { versionA: state.rules.compareA, versionB: state.rules.compareB };
+    if (state.rules.trialScope === 'unbilled') payload.unbilledOnly = true;
+    else if (state.rules.trialScope === 'customer') payload.customerId = state.rules.trialCustomerId;
+    else if (state.rules.trialScope === 'period' && state.rules.trialPeriod) payload.period = state.rules.trialPeriod;
+    state.rules.trialLoading = true;
+    state.rules.trial = null;
+    renderRight();
+    try {
+      state.rules.trial = await api('POST', '/api/pricing-versions/compare-trial', payload);
+      var t = state.rules.trial;
+      ok('两版试算完成：A 合计 ' + money(t.totalA) + '，B 合计 ' + money(t.totalB) + '，差额合计 ' + signedMoney(t.diffYuan) + ' 元');
+    } catch (err) { fail(err); } finally {
+      state.rules.trialLoading = false;
+      renderRight();
+    }
+  }
+
+  function readPublishForm() {
+    var form = document.getElementById('rulePublishForm');
+    if (!form) return null;
+    function val(name) {
+      var el = form.querySelector('[data-field="' + name + '"]');
+      return el ? String(el.value).trim() : '';
+    }
+    var payload = { reason: val('reason') };
+    var now = document.getElementById('rulePublishNow');
+    state.rules.publishEffectiveNow = now ? now.checked : true;
+    if (!state.rules.publishEffectiveNow) payload.effectiveAt = val('effectiveAt');
+    SETTING_DEFS.forEach(function (def) {
+      var raw = val(def.key);
+      if (raw !== '') payload[def.key] = Number(raw);
+    });
+    return payload;
+  }
+
+  async function publishRuleVersion() {
+    var payload = readPublishForm();
+    if (!payload) return;
+    try {
+      var created = await api('POST', '/api/pricing-versions/publish', payload);
+      state.rules.mode = 'detail';
+      state.rules.selectedVersionNo = created.versionNo;
+      state.rules.versionDiff = null;
+      state.rules.trial = null;
+      await refreshAll();
+      render();
+      await loadRuleVersionDetail(created.versionNo);
+      ok('已发布 v' + created.versionNo + '，生效时刻 ' + stampText(created.effectiveAt) + '，共 ' + created.changes.length + ' 项改动');
+    } catch (err) { fail(err); }
+  }
+
   /* ================= 渲染总入口 ================= */
   function renderLeft() {
     if (state.tab === 'overview') setLeft(renderOverviewLeft());
     else if (state.tab === 'waybills') setLeft(renderWaybillsLeft());
     else if (state.tab === 'zones') setLeft(renderZonesLeft());
     else if (state.tab === 'customers') setLeft(renderCustomersLeft());
+    else if (state.tab === 'rules') setLeft(renderRulesLeft());
     else setLeft(renderBillsLeft());
   }
   function renderMid() {
@@ -1243,6 +1705,7 @@
     else if (state.tab === 'waybills') setMid(renderWaybillsMid());
     else if (state.tab === 'zones') setMid(renderZonesMid());
     else if (state.tab === 'customers') setMid(renderCustomersMid());
+    else if (state.tab === 'rules') setMid(renderRulesMid());
     else setMid(renderBillsMid());
   }
   function renderRight() {
@@ -1250,6 +1713,7 @@
     else if (state.tab === 'waybills') setRight(renderWaybillsRight());
     else if (state.tab === 'zones') setRight(renderZonesRight());
     else if (state.tab === 'customers') setRight(renderCustomersRight());
+    else if (state.tab === 'rules') setRight(renderRulesRight());
     else setRight(renderBillsRight());
   }
 
@@ -1264,6 +1728,15 @@
       await refreshAll();
       render();
       if (key === 'bills' && state.selectedBillId) await loadBillDetail(state.selectedBillId);
+      if (key === 'rules' && state.rules.selectedVersionNo && !state.rules.versionDetail) {
+        await loadRuleVersionDetail(state.rules.selectedVersionNo);
+        var detail = state.rules.versionDetail;
+        if (detail) {
+          state.rules.compareA = String(detail.previousVersionNo || detail.versionNo);
+          state.rules.compareB = String(state.rules.latestVersionNo || detail.versionNo);
+          renderRight();
+        }
+      }
       ok('已切换到「' + TAB_LABELS[key] + '」');
     } catch (err) {
       fail(err);
@@ -1338,6 +1811,17 @@
     if (el.id === 'custDiscount') {
       var preview = document.getElementById('discountPreview');
       if (preview) preview.textContent = '当前折扣：' + discountTextOf(el.value);
+    }
+    if (el.name === 'trialScope') {
+      state.rules.trialScope = el.value;
+      var customerBox = document.getElementById('trialCustomerBox');
+      var periodBox = document.getElementById('trialPeriodBox');
+      if (customerBox) customerBox.hidden = el.value !== 'customer';
+      if (periodBox) periodBox.hidden = el.value !== 'period';
+    }
+    if (el.id === 'rulePublishNow') {
+      var effField = document.querySelector('#rulePublishForm [data-field="effectiveAt"]');
+      if (effField) effField.disabled = el.checked;
     }
   }
 
@@ -1529,6 +2013,36 @@
         break;
       case 'refresh-bills':
         try { await loadBills(); await loadPeriods(); await loadSummary(); render(); ok('账单清单已刷新，共 ' + state.bills.total + ' 张'); } catch (err) { fail(err); }
+        break;
+
+      case 'new-rule-version':
+        state.rules.mode = 'publish';
+        clearNotice();
+        clearFieldErrors();
+        renderRight();
+        setStatus('填要调整的参数，发布时生成新版本');
+        break;
+      case 'select-rule-version': await selectRuleVersion(id); break;
+      case 'cancel-rule-form':
+        state.rules.mode = 'detail';
+        clearNotice();
+        renderRight();
+        setStatus('已取消发布');
+        break;
+      case 'publish-rule-version': await publishRuleVersion(); break;
+      case 'query-effective': await queryEffectiveVersion(); break;
+      case 'apply-version-diff': await applyVersionDiff(); break;
+      case 'run-version-trial': await runVersionTrial(); break;
+      case 'refresh-rules':
+        try {
+          await loadRules(); await loadSummary();
+          if (state.rules.selectedVersionNo) {
+            var exists = state.rules.list.some(function (v) { return Number(v.versionNo) === Number(state.rules.selectedVersionNo); });
+            if (exists) { await loadRuleVersionDetail(state.rules.selectedVersionNo); }
+          }
+          render();
+          ok('版本清单已刷新，共 ' + state.rules.total + ' 个版本');
+        } catch (err) { fail(err); }
         break;
       default:
         break;
